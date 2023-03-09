@@ -25,3 +25,5 @@ Useful links:
 * https://www.online-utility.org/image/convert/to/XBM
 * https://github.com/m5stack/M5Stack/tree/master/examples/Advanced/Display/drawXBitmap
 * https://lang-ship.com/reference/unofficial/M5StickC/Class/ESP32/BLEScan/
+
+![Product Image](/M5Stack-and-RuuviTag.jpg)
