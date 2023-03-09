@@ -388,7 +388,7 @@ void setup()
   other.fillSprite(WHITE);
   other.setTextColor(BLACK, WHITE);
   other.drawString(String("IoT"), 0, 0, 1);
-  other.pushSprite(140, 100, GREEN);
+  other.pushSprite(140, 120, GREEN);
 
   // Set battery count to a negative value
   batteryCount = -200;
