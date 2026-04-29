@@ -1,103 +1,160 @@
 # Power Optimization Suggestions
 
 Current estimated power consumption: **~180–300 mA** (varies with LCD voltage and BLE activity)
-Target: **~50–90 mA** (at least 50% reduction)
+Target: **~30–60 mA** (70–85% reduction)
 
-## Quick Wins (minimal code changes)
+## Primary Approach: LCD off on battery, on-demand via touch
 
-### 1. LCD on-demand — turn off backlight between updates
+The LCD backlight consumes ~120–200 mA — roughly 60–70% of total power.
+Core idea: **on battery, LCD is always off. Touch wakes it for 10 seconds.**
 
-The display only needs to show new data once per minute (task3). Turning off the LCD
-backlight between updates saves **~120–200 mA** for ~55 seconds out of every 60.
+When user touches the screen:
+1. Wake LCD, show latest data
+2. Trigger a fresh BLE scan immediately
+3. After 10 seconds of inactivity, sleep LCD again
 
-**Implementation sketch:**
+### Implementation sketch
+
+**New state variables:**
 ```cpp
-// In task3, after drawing:
-M5.Lcd.sleep();                    // Turn off LCD
-// When touch detected (task1), or at next update:
-M5.Lcd.wakeup();
-M5.Axp.SetLcdVoltage(3000);
+bool displayActive = false;
+unsigned long displayOffTime = 0;
+bool immediateScan = false;
 ```
 
-With LCD off 55/60 seconds: average savings ~110–180 mA.
-
-### 2. Reduce CPU frequency to 80 MHz
-
-ESP32 runs at 240 MHz by default. This application (BLE scan + text display) does not
-need that speed. 80 MHz is sufficient and cuts CPU current from ~50 mA to ~20 mA.
-
-**Implementation:** In `setup()`, before BLE init:
+**Task 1 (touch) — modified:**
 ```cpp
-setCpuFrequencyMhz(80);   // or 160 as a middle ground
+void task1(void *pvParameters) {
+  while (1) {
+    M5.update();
+    if (M5.Touch.changed && M5.Touch.points > 0) {
+      if (!displayActive) {
+        M5.Lcd.wakeup();              // Wake LCD
+        M5.Axp.SetLcdVoltage(3000);   // Full brightness
+        displayActive = true;
+        immediateScan = true;         // Trigger BLE scan
+        // Notify task2 to scan immediately
+        xTaskNotifyGive(Handle_getTemperatureTask);
+      }
+      displayOffTime = millis() + 10000;  // Reset 10 s timer
+      batteryCount = 0;
+    }
+    // Auto turn off after 10 seconds
+    if (displayActive && millis() > displayOffTime) {
+      M5.Lcd.sleep();
+      displayActive = false;
+    }
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+  }
+}
 ```
 
-### 3. Reduce BLE scan time
+**Task 2 (BLE scan) — add immediate scan support:**
+```cpp
+void task2(void *pvParameters) {
+  while (1) {
+    // Normal periodic scan every 180 s
+    BLEScanResults foundDevices = ruuviScan->start(5, false);
+    ruuviScan->clearResults();
 
-Current scan is 15 seconds every 3 minutes. The callback typically finds the RuuviTag
-within 1–3 seconds. Reducing to 5 seconds saves scan power without missing packets.
+    // Wait for delay OR notification (touch-triggered scan)
+    ulTaskNotifyTake(pdTRUE, 180000 / portTICK_PERIOD_MS);
 
-**Implementation:** In task2:
+    // If woken by touch: scan immediately again for fresh data
+    if (immediateScan) {
+      immediateScan = false;
+      ruuviScan->start(5, false);
+      ruuviScan->clearResults();
+    }
+  }
+}
+```
+
+**Task 3 (display) — skip LCD ops when display is off:**
+```cpp
+void task3(void *pvParameters) {
+  while (1) {
+    drawGraph();       // Still updates temperature array
+    showTemperature(); // Only draws sprites if display is active
+    vTaskDelay(60000 / portTICK_PERIOD_MS);
+  }
+}
+```
+
+Add a flag check inside `showTemperature()` (and optionally `drawGraph()`):
+```cpp
+if (!displayActive) {
+  temperature.deleteSprite();
+  other.deleteSprite();
+  return;  // or skip sprite creation entirely
+}
+```
+
+**Task 4 (battery) — respect LCD sleep:**
+```cpp
+// Only SetLcdVoltage if display is active
+if (displayActive) { ... adjust voltage ... }
+```
+
+### Estimated power savings
+
+| State | Current | Duration | Weighted avg |
+|-------|--------:|---------:|------------:|
+| LCD off, CPU 80 MHz, BLE idle | ~25 mA | ~55 s/min | ~23 mA |
+| LCD on (data shown) | ~170 mA | ~5 s/min | ~14 mA |
+| BLE scanning (5 s) | ~50 mA | ~5 s/3 min | ~1.5 mA |
+| **Estimated average** | | | **~38 mA** |
+
+This is ~80% reduction from the current ~200 mA average.
+
+### Corner cases
+
+- **On USB power:** LCD could stay on permanently (charging flag in M5Stat)
+- **First boot (fillCounter == 0):** Show logo briefly, then sleep LCD
+- **BLE scan on touch:** If no RuuviTag found within 5 s, show stale data
+  — still better than a blank screen
+
+## Additional Optimizations (stack on top)
+
+### CPU frequency: 80 MHz
+ESP32 defaults to 240 MHz. This app only polls BLE and draws text:
+```cpp
+setCpuFrequencyMhz(80);   // in setup()
+```
+Saves ~30 mA.
+
+### Shorter BLE scan
+RuuviTag is typically found within 1–3 seconds. 5 s scan is sufficient:
 ```cpp
 BLEScanResults foundDevices = ruuviScan->start(5, false);  // was 15
 ```
 
-### 4. Disable Serial output after debug
-
-`Serial.print()` keeps the UART peripheral active (~5–10 mA). After initial debug info
-in `setup()`, the Serial console is only used by `taskMonitor()` every 62 seconds.
-
-**Implementation:** Either remove Serial calls entirely, or:
+### Disable Serial after debug
+UART peripheral draws ~5–10 mA. After `setup()` debug info:
 ```cpp
-if (Serial) Serial.end();  // after setup debug output
+Serial.end();   // or remove Serial calls entirely
 ```
 
-## Medium Effort
+### Combined impact
 
-### 5. CPU light sleep between task cycles
+| Optimization | Savings | Running total |
+|-------------|--------:|--------------:|
+| LCD off on battery, 10 s on touch | ~160 mA | ~40 mA |
+| CPU 80 MHz | ~30 mA | ~28 mA |
+| BLE 5 s scan | ~8 mA | ~25 mA |
+| Serial off | ~5 mA | ~20 mA |
 
-ESP32's `light_sleep` pauses the CPU between FreeRTOS ticks. Combined with idle tasks
-yielding, this can reduce baseline current from ~50 mA to ~10–15 mA. Requires enabling
-in menuconfig or calling `esp_light_sleep_start()` judiciously.
+**Estimated final average: ~20–30 mA** — battery would last 8–12 hours
+(on M5Core2's 1200 mAh battery) vs. current ~2–4 hours.
 
-### 6. Combine task cycles into a single wake-schedule
+## Beyond: Deep Sleep
 
-Currently tasks 3, 4, and 5 all run on different timers. They could be merged so the
-device wakes once per minute, does everything, then sleeps. This allows deeper idle
-between cycles.
+For **weeks of battery life**, the next step is deep sleep:
+- RTC timer wakes ESP32 every 5 minutes
+- Quick BLE scan + update display for 3 seconds
+- Back to deep sleep
+- Touch wake via RTC GPIO interrupt
+- Estimated average: ~2–5 mA
 
-## High Impact — Deep Sleep (most complex)
-
-### 7. Deep sleep between measurements
-
-**Estimated average current: ~5–15 mA** (95%+ reduction from current)
-
-Flow:
-1. Enter deep sleep for 5 minutes
-2. RTC timer wakes ESP32
-3. Re-init BLE, scan for RuuviTag (~3 s)
-4. Update display (~2 s)
-5. Back to deep sleep
-
-**Trade-offs:**
-- Slower touch response (touch would need to wake from deep sleep via RTC GPIO)
-- Slightly longer library re-init on each wake
-- Best battery life (weeks on a single charge)
-
-### 8. Use UltraLowPower (ULP) coprocessor for periodic BLE
-
-ESP32 has a ULP coprocessor that can run during deep sleep. While it cannot run the
-BLE controller directly, it can wake the main CPU only when a GPIO event occurs.
-
-## Recommended First Steps
-
-For a **reliable 50%+ reduction** with minimal code risk:
-
-| Step | Savings | Complexity |
-|------|---------|------------|
-| 1. LCD off between updates | ~150 mA | Low |
-| 2. CPU 80 MHz | ~30 mA | Low |
-| 3. BLE scan 5 s instead of 15 | ~10 mA | Low |
-| 4. Disable Serial | ~5 mA | Low |
-| **Total estimated** | **~195 mA** | → ~50–70 mA |
-
-If more savings are needed after these steps, consider deep sleep (option 7).
+This is a larger refactor — task-based architecture changes to a
+wake-do-sleep cycle — but offers the best possible battery life.
