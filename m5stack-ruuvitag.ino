@@ -53,9 +53,9 @@ struct ruuvi
 } ruuviTag;
 
 // Power consumption statistics data structure
-struct stat
+struct DeviceStat
 {
-  stat()
+  DeviceStat()
       : powerConsumption(0.0), batteryCapacity(0.0), USBVoltage(0.0), charging(0.0) {}
   float powerConsumption;
   float batteryCapacity;
@@ -93,7 +93,7 @@ void decodeRuuvi(String hex_data, int rssi)
     ruuviTag.pressure = hexToInt(hex_data.substring(14, 18)) * 1 + 50000;
 
     int voltage_power = hexToInt(hex_data.substring(30, 34));
-    ruuviTag.voltage = (uint32_t)((voltage_power & 0x0b1111111111100000) >> 5) + 1600;
+    ruuviTag.voltage = (uint32_t)((voltage_power & 0xFFE0) >> 5) + 1600;
   }
 }
 
@@ -141,6 +141,7 @@ void drawGraph()
       if (temperatures[i] < min)
         min = temperatures[i];
     }
+    fillCounter++;
   }
   else
   {
@@ -156,8 +157,6 @@ void drawGraph()
       if (temperatures[i] < min)
         min = temperatures[i];
     }
-    // Reset the fill counter to the fill counter maximum
-    fillCounter = 285;
   }
 
   min = min - 3;
@@ -194,7 +193,6 @@ void drawGraph()
   graph.drawString(String((int)max), 295, 6, 2);
   graph.pushSprite(0, 100, GREEN);
   graph.deleteSprite();
-  fillCounter++;
 }
 
 // This function displays temperature, humidity, pressure and power consumption data on the screen
@@ -369,7 +367,7 @@ void setup()
   other.setFreeFont(&BSComp_Book12pt7b);
 
   // Initialize temperature-array to -99
-  for (int i = 0; i < 120; i++)
+  for (int i = 0; i < 285; i++)
   {
     temperatures[i] = -99;
   }
@@ -389,6 +387,7 @@ void setup()
   other.setTextColor(BLACK, WHITE);
   other.drawString(String("IoT"), 0, 0, 1);
   other.pushSprite(140, 120, GREEN);
+  other.deleteSprite();
 
   // Set battery count to a negative value
   batteryCount = -200;
@@ -409,7 +408,7 @@ void setup()
   // Creates tasks
   xTaskCreatePinnedToCore(task1, "touchScreenTask", configMINIMAL_STACK_SIZE + 1024, NULL, tskIDLE_PRIORITY, &Handle_touchScreenTask, 0);
   xTaskCreatePinnedToCore(task2, "getTemperatureTask", configMINIMAL_STACK_SIZE + 1024, NULL, tskIDLE_PRIORITY + 1, &Handle_getTemperatureTask, 0);
-  xTaskCreatePinnedToCore(task3, "drawGraphTask", configMINIMAL_STACK_SIZE + 2048, NULL, tskIDLE_PRIORITY, &Handle_drawGraphTask, 0);
+  xTaskCreatePinnedToCore(task3, "drawGraphTask", configMINIMAL_STACK_SIZE + 4096, NULL, tskIDLE_PRIORITY, &Handle_drawGraphTask, 0);
   xTaskCreatePinnedToCore(task4, "powerConsumptionTask", configMINIMAL_STACK_SIZE + 1024, NULL, tskIDLE_PRIORITY, &Handle_powerConsumptionTask, 0);
   xTaskCreatePinnedToCore(task5, "statisticsTask", configMINIMAL_STACK_SIZE + 1024, NULL, tskIDLE_PRIORITY, &Handle_statisticsTask, 0);
 }
